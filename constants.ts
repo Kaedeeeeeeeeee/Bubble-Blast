@@ -29,9 +29,15 @@ export const COLORS = [
   BubbleColor.ORANGE,
 ];
 
+export enum GameMode {
+  CLASSIC = 'CLASSIC',
+  RUSH = 'RUSH'
+}
+
 export const GAME_STATES = {
   MENU: 'MENU',
   PLAYING: 'PLAYING',
+  PAUSED: 'PAUSED',
   GAME_OVER: 'GAME_OVER',
   VICTORY: 'VICTORY',
 } as const;

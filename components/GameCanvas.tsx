@@ -1,43 +1,54 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { ArrowUp, RotateCcw, Play, Trophy, RefreshCw, RefreshCcw, Zap, Disc } from 'lucide-react';
+import { ArrowUp, RotateCcw, Play, Trophy, RefreshCw, Zap, Settings, X, Music, Volume2, Timer, AlertTriangle } from 'lucide-react';
 import { 
   CANVAS_WIDTH, CANVAS_HEIGHT, BUBBLE_RADIUS, COLORS, 
-  PROJECTILE_SPEED, SHOOTER_Y, GAME_STATES, GameState, BubbleColor, GRID_COLS, ItemType
+  PROJECTILE_SPEED, SHOOTER_Y, GAME_STATES, GameState, BubbleColor, GRID_COLS, ItemType, GameMode
 } from '../constants';
 import { Bubble, Particle, Point, FloatingText, LaserBeam } from '../types';
 import * as Engine from '../utils/engine';
+import { audio } from '../utils/audio';
 
 const GameCanvas: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [gameState, setGameState] = useState<GameState>(GAME_STATES.MENU);
+  const [gameMode, setGameMode] = useState<GameMode>(GameMode.CLASSIC);
   const [score, setScore] = useState(0);
   const [highScore, setHighScore] = useState(0);
   
-  // UI State for Danger Meter
+  // Audio Volume States
+  const [sfxVolume, setSfxVolume] = useState(0.5);
+  const [bgmVolume, setBgmVolume] = useState(0.4);
+  
+  // UI State for Danger Meter (Classic)
   const [missCount, setMissCount] = useState(0);
+  
+  // UI State for Rush Mode
+  const [rushProgress, setRushProgress] = useState(0); // 0 to 1 for UI bar
 
   // Game State Refs
   const bubblesRef = useRef<Bubble[]>([]);
   const particlesRef = useRef<Particle[]>([]);
   const floatingTextsRef = useRef<FloatingText[]>([]);
-  const laserBeamsRef = useRef<LaserBeam[]>([]); // New: For visualizing laser shots
+  const laserBeamsRef = useRef<LaserBeam[]>([]); 
   const projectileRef = useRef<{ x: number; y: number; vx: number; vy: number; color: BubbleColor; active: boolean } | null>(null);
   
   const upcomingBubblesRef = useRef<BubbleColor[]>([]);
   
   // Combo System
   const comboRef = useRef<number>(0);
-  const comboDisplayTimerRef = useRef<number>(0); // Controls visibility duration of Combo HUD
+  const comboDisplayTimerRef = useRef<number>(0);
 
-  // Inventory System (Replaces simple boolean flag)
-  // Now holds the TYPE of item available, or null if empty
   const inventoryRef = useRef<ItemType | null>(null);
 
   const missCountRef = useRef<number>(0);
   const MISS_THRESHOLD = 5;
   
+  // Rush Mode Refs
+  const rushStartTimeRef = useRef<number>(0);
+  const rushLastPenaltyTimeRef = useRef<number>(0);
+  const rushCurrentIntervalRef = useRef<number>(20); // Starts at 20s
+  
   const shakeRef = useRef<number>(0);
-
   const DEATH_LINE_Y = SHOOTER_Y - 100;
 
   const mouseRef = useRef<Point>({ x: CANVAS_WIDTH / 2, y: CANVAS_HEIGHT / 2 });
@@ -55,7 +66,32 @@ const GameCanvas: React.FC = () => {
     }
   };
 
-  const initGame = useCallback(() => {
+  const updateVolumes = (type: 'SFX' | 'BGM', val: number) => {
+    if (type === 'SFX') {
+        setSfxVolume(val);
+        audio.setSFXVolume(val);
+    } else {
+        setBgmVolume(val);
+        audio.setBGMVolume(val);
+    }
+  };
+
+  const togglePause = () => {
+      if (gameState === GAME_STATES.PLAYING) {
+          setGameState(GAME_STATES.PAUSED);
+      } else if (gameState === GAME_STATES.PAUSED) {
+          setGameState(GAME_STATES.PLAYING);
+      }
+  };
+
+  const restartGame = () => {
+      initGame(gameMode);
+  };
+
+  const initGame = useCallback((mode: GameMode) => {
+    // Start Audio Engine
+    audio.startBGM();
+
     bubblesRef.current = Engine.createLevel(5); 
     particlesRef.current = [];
     floatingTextsRef.current = [];
@@ -64,8 +100,15 @@ const GameCanvas: React.FC = () => {
     comboRef.current = 0;
     comboDisplayTimerRef.current = 0;
     
+    // Reset Classic state
     missCountRef.current = 0;
     setMissCount(0);
+
+    // Reset Rush state
+    rushStartTimeRef.current = Date.now();
+    rushLastPenaltyTimeRef.current = Date.now();
+    rushCurrentIntervalRef.current = 20;
+    setRushProgress(0);
 
     inventoryRef.current = null;
     shakeRef.current = 0;
@@ -73,9 +116,21 @@ const GameCanvas: React.FC = () => {
     upcomingBubblesRef.current = [];
     ensureUpcomingBubbles();
     
+    setGameMode(mode);
     setScore(0);
     setGameState(GAME_STATES.PLAYING);
   }, []);
+
+  // Stop music on game over/victory logic hook
+  useEffect(() => {
+      if (gameState === GAME_STATES.GAME_OVER) {
+          audio.stopBGM();
+          audio.playGameOver();
+      } else if (gameState === GAME_STATES.VICTORY) {
+          audio.stopBGM();
+          audio.playVictory();
+      }
+  }, [gameState]);
 
   const spawnParticles = (x: number, y: number, color: string, count: number = 10, type: 'normal' | 'shockwave' | 'spark' = 'normal') => {
     const isExplosive = color === BubbleColor.EXPLOSIVE;
@@ -98,7 +153,6 @@ const GameCanvas: React.FC = () => {
     }
 
     if (type === 'spark') {
-        // Laser spark
         for (let i = 0; i < count; i++) {
             const angle = Math.random() * Math.PI * 2;
             const speed = Math.random() * 5 + 2;
@@ -108,7 +162,7 @@ const GameCanvas: React.FC = () => {
                 vx: Math.cos(angle) * speed,
                 vy: Math.sin(angle) * speed,
                 life: 0.5,
-                color: '#22d3ee', // Cyan sparks
+                color: '#22d3ee', 
                 size: Math.random() * 3 + 1
             });
         }
@@ -145,6 +199,8 @@ const GameCanvas: React.FC = () => {
       if (gameState !== GAME_STATES.PLAYING || projectileRef.current?.active) return;
       if (upcomingBubblesRef.current.length < 2) ensureUpcomingBubbles();
 
+      audio.playSwap(); 
+
       const temp = upcomingBubblesRef.current[0];
       upcomingBubblesRef.current[0] = upcomingBubblesRef.current[1];
       upcomingBubblesRef.current[1] = temp;
@@ -153,22 +209,23 @@ const GameCanvas: React.FC = () => {
       spawnParticles(PREVIEW_CENTER_X, PREVIEW_CENTER_Y, '#22d3ee', 5);
   };
 
-  // Logic to Equip Inventory Item (Bomb or Laser)
   const equipItem = () => {
       if (gameState !== GAME_STATES.PLAYING || projectileRef.current?.active) return;
       if (!inventoryRef.current) return;
+
+      audio.playEquip(); 
 
       if (inventoryRef.current === 'BOMB') {
           upcomingBubblesRef.current[0] = BubbleColor.EXPLOSIVE;
           spawnFloatingText(BOMB_CENTER_X, SHOOTER_Y - 40, "BOMB EQUIPPED!", '#ef4444');
           spawnParticles(BOMB_CENTER_X, SHOOTER_Y, '#ef4444', 10);
       } else if (inventoryRef.current === 'LASER') {
-          upcomingBubblesRef.current[0] = BubbleColor.LASER; // Use LASER marker
+          upcomingBubblesRef.current[0] = BubbleColor.LASER; 
           spawnFloatingText(BOMB_CENTER_X, SHOOTER_Y - 40, "LASER READY!", '#22d3ee');
           spawnParticles(BOMB_CENTER_X, SHOOTER_Y, '#22d3ee', 15, 'spark');
       }
 
-      inventoryRef.current = null; // Consume inventory
+      inventoryRef.current = null; 
   };
 
   const shoot = () => {
@@ -186,11 +243,11 @@ const GameCanvas: React.FC = () => {
 
     // --- LASER LOGIC ---
     if (colorToShoot === BubbleColor.LASER) {
-        // Instant Raycast Shot
+        audio.playLaserShoot(); 
+
         const endX = CANVAS_WIDTH / 2 + Math.cos(angle) * CANVAS_HEIGHT * 1.5;
         const endY = SHOOTER_Y + Math.sin(angle) * CANVAS_HEIGHT * 1.5;
 
-        // Visual Beam
         laserBeamsRef.current.push({
             startX: CANVAS_WIDTH / 2,
             startY: SHOOTER_Y,
@@ -202,8 +259,6 @@ const GameCanvas: React.FC = () => {
         shakeRef.current = 15;
         spawnParticles(CANVAS_WIDTH / 2, SHOOTER_Y, '#22d3ee', 20, 'spark');
 
-        // Line Collision Math
-        // Line equation: P = start + t * (end - start)
         const p1 = { x: CANVAS_WIDTH / 2, y: SHOOTER_Y };
         const p2 = { x: endX, y: endY };
         
@@ -212,23 +267,21 @@ const GameCanvas: React.FC = () => {
         bubblesRef.current.forEach(b => {
             if (!b.active) return;
             
-            // Distance from point to line segment
-            // https://en.wikipedia.org/wiki/Distance_from_a_point_to_a_line
             const top = Math.abs((p2.x - p1.x) * (p1.y - b.y) - (p1.x - b.x) * (p2.y - p1.y));
             const bot = Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
             const dist = top / bot;
 
-            // Check if bubble is "in front" of shooter (projection)
             const dot = (b.x - p1.x) * (p2.x - p1.x) + (b.y - p1.y) * (p2.y - p1.y);
             
             if (dist < BUBBLE_RADIUS && dot > 0) {
                 b.popping = true;
+                audio.playPop(1.5); 
                 spawnParticles(b.x, b.y, b.color, 10, 'spark');
                 hitCount++;
 
-                // FIXED: Check for item collection when using laser
                 if (b.itemType === 'LASER') {
                     inventoryRef.current = 'LASER';
+                    audio.playEquip();
                     spawnFloatingText(b.x, b.y, "LASER ACQUIRED!", '#22d3ee');
                 }
             }
@@ -239,7 +292,6 @@ const GameCanvas: React.FC = () => {
             spawnFloatingText(CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2, `LASER HIT! +${hitCount * 20}`, '#22d3ee');
         }
 
-        // Consume Laser active state
         upcomingBubblesRef.current.shift();
         upcomingBubblesRef.current.push(COLORS[Math.floor(Math.random() * COLORS.length)]);
         
@@ -248,6 +300,8 @@ const GameCanvas: React.FC = () => {
     }
 
     // --- STANDARD PROJECTILE LOGIC ---
+    audio.playShoot(); 
+
     projectileRef.current = {
       x: CANVAS_WIDTH / 2,
       y: SHOOTER_Y,
@@ -273,8 +327,11 @@ const GameCanvas: React.FC = () => {
       newRows.forEach(b => b.id = `penalty-${Date.now()}-${b.id}`);
       bubblesRef.current.push(...newRows);
 
-      spawnFloatingText(CANVAS_WIDTH / 2, CANVAS_HEIGHT / 3, "DANGER! +2 ROWS", '#ef4444');
+      spawnFloatingText(CANVAS_WIDTH / 2, CANVAS_HEIGHT / 3, "INCOMING! +2 ROWS", '#ef4444');
       shakeRef.current = 10;
+      
+      // Play a warning sound
+      audio.playGameOver(); // Reuse game over sound as a deep warning for now
       
       checkGameOver();
   };
@@ -287,19 +344,46 @@ const GameCanvas: React.FC = () => {
   };
 
   const update = () => {
+    if (gameState === GAME_STATES.PAUSED) return;
     if (gameState !== GAME_STATES.PLAYING) return;
+
+    const now = Date.now();
+
+    // --- RUSH MODE LOGIC ---
+    if (gameMode === GameMode.RUSH) {
+        // Calculate game time in seconds
+        const elapsedSeconds = (now - rushStartTimeRef.current) / 1000;
+        
+        // Linear Interpolation: 20s -> 1s over 300s (5 minutes)
+        const startInterval = 20;
+        const endInterval = 1;
+        const maxDuration = 300;
+        
+        const progress = Math.min(elapsedSeconds / maxDuration, 1);
+        const currentInterval = startInterval - (progress * (startInterval - endInterval));
+        
+        rushCurrentIntervalRef.current = currentInterval;
+
+        const timeSinceLastPenalty = (now - rushLastPenaltyTimeRef.current) / 1000;
+        const percent = Math.min(timeSinceLastPenalty / currentInterval, 1);
+        setRushProgress(percent);
+
+        if (timeSinceLastPenalty >= currentInterval) {
+            triggerPenalty();
+            rushLastPenaltyTimeRef.current = now;
+            setRushProgress(0);
+        }
+    }
 
     if (shakeRef.current > 0) {
         shakeRef.current *= 0.9;
         if (shakeRef.current < 0.5) shakeRef.current = 0;
     }
 
-    // Combo Timer Decay
     if (comboDisplayTimerRef.current > 0) {
-        comboDisplayTimerRef.current -= 0.02; // Approx 1s / 60 frames
+        comboDisplayTimerRef.current -= 0.02; 
     }
 
-    // Update Laser Visuals
     laserBeamsRef.current.forEach(beam => beam.life -= 0.1);
     laserBeamsRef.current = laserBeamsRef.current.filter(beam => beam.life > 0);
 
@@ -314,6 +398,7 @@ const GameCanvas: React.FC = () => {
       }
 
       if (proj.y < BUBBLE_RADIUS) {
+        audio.playPop(0.8); 
         handleCollision();
       } else {
         for (const b of bubblesRef.current) {
@@ -385,6 +470,8 @@ const GameCanvas: React.FC = () => {
          return;
     }
 
+    audio.playPop(0.5);
+
     const newBubblePos = Engine.getGridPosition(bestR, bestC);
     const newBubble: Bubble = {
       id: `${bestR}-${bestC}-${Date.now()}`,
@@ -413,7 +500,8 @@ const GameCanvas: React.FC = () => {
         const uniqueTargetIds = new Set(allTargets.map(t => `${t.r},${t.c}`));
 
         newBubble.popping = true;
-        
+        audio.playExplosion(); 
+
         spawnParticles(newBubble.x, newBubble.y, BubbleColor.EXPLOSIVE, 20);
         spawnParticles(newBubble.x, newBubble.y, '', 0, 'shockwave');
         shakeRef.current = 20;
@@ -426,9 +514,9 @@ const GameCanvas: React.FC = () => {
                     b.popping = true;
                     spawnParticles(b.x, b.y, b.color);
                     scoreAdd += 10;
-                    // Check for item collection in blast
                     if (b.itemType === 'LASER') {
                         inventoryRef.current = 'LASER';
+                        audio.playEquip(); 
                         spawnFloatingText(b.x, b.y, "LASER ACQUIRED!", '#22d3ee');
                     }
                 }
@@ -450,8 +538,9 @@ const GameCanvas: React.FC = () => {
             successfulClear = true;
             comboRef.current += 1; 
             
-            // Activate Combo Display
-            comboDisplayTimerRef.current = 2.0; // Show for 2 seconds
+            audio.playPop(1 + (cluster.length * 0.05));
+
+            comboDisplayTimerRef.current = 2.0; 
 
             let scoreAdd = 0;
             cluster.forEach(b => {
@@ -459,9 +548,9 @@ const GameCanvas: React.FC = () => {
                 spawnParticles(b.x, b.y, b.color);
                 scoreAdd += 10;
                 
-                // --- ITEM COLLECTION LOGIC ---
                 if (b.itemType === 'LASER') {
                     inventoryRef.current = 'LASER';
+                    audio.playEquip(); 
                     spawnFloatingText(b.x, b.y, "LASER ACQUIRED!", '#22d3ee');
                 }
             });
@@ -477,6 +566,7 @@ const GameCanvas: React.FC = () => {
 
             if (comboRef.current >= 5) {
                 inventoryRef.current = 'BOMB';
+                audio.playEquip(); 
                 spawnFloatingText(BOMB_CENTER_X, SHOOTER_Y - 40, "BOMB READY!", '#ef4444');
                 comboRef.current = 0; 
             }
@@ -490,21 +580,27 @@ const GameCanvas: React.FC = () => {
         }
     }
 
-    if (!successfulClear) {
+    // Only apply miss count logic in CLASSIC mode
+    if (!successfulClear && gameMode === GameMode.CLASSIC) {
         missCountRef.current += 1;
         setMissCount(missCountRef.current); 
-    }
-    
-    if (missCountRef.current >= MISS_THRESHOLD) {
-        triggerPenalty();
-        missCountRef.current = 0; 
-        setMissCount(0); 
+        
+        if (missCountRef.current >= MISS_THRESHOLD) {
+            triggerPenalty();
+            missCountRef.current = 0; 
+            setMissCount(0); 
+        }
     }
   };
 
   const handleFallingBubbles = (excludeCluster: Bubble[] = []) => {
       const activeBubbles = bubblesRef.current.filter(b => b.active && !b.popping);
       const floating = Engine.findFloatingBubbles(activeBubbles);
+      
+      if (floating.length > 0) {
+        setTimeout(() => audio.playPop(0.5), 100);
+      }
+
       floating.forEach(b => {
         const bInRef = bubblesRef.current.find(orig => orig.id === b.id);
         if (bInRef) {
@@ -512,9 +608,9 @@ const GameCanvas: React.FC = () => {
           spawnParticles(bInRef.x, bInRef.y, bInRef.color, 5);
           setScore(prev => prev + 20);
           
-          // Falling items are also collected!
           if (bInRef.itemType === 'LASER') {
              inventoryRef.current = 'LASER';
+             audio.playEquip(); 
              spawnFloatingText(bInRef.x, bInRef.y, "LASER ACQUIRED!", '#22d3ee');
           }
         }
@@ -530,6 +626,8 @@ const GameCanvas: React.FC = () => {
       }, 200);
   };
 
+  // ... (Drawing methods remain largely the same, handled via the draw function below)
+  
   const drawAimLine = (ctx: CanvasRenderingContext2D, startX: number, startY: number, angle: number) => {
       // If equipping laser, aim line should be solid and bright cyan
       const isLaser = upcomingBubblesRef.current[0] === BubbleColor.LASER;
@@ -651,7 +749,7 @@ const GameCanvas: React.FC = () => {
     ctx.fillRect(-50, -50, CANVAS_WIDTH + 100, CANVAS_HEIGHT + 100);
     ctx.restore();
 
-    if (gameState === GAME_STATES.PLAYING) {
+    if (gameState === GAME_STATES.PLAYING || gameState === GAME_STATES.PAUSED) {
         ctx.save();
         ctx.beginPath();
         ctx.moveTo(0, DEATH_LINE_Y);
@@ -668,14 +766,15 @@ const GameCanvas: React.FC = () => {
         ctx.restore();
     }
 
-    if (missCountRef.current >= MISS_THRESHOLD - 1) {
+    if (gameMode === GameMode.CLASSIC && missCountRef.current >= MISS_THRESHOLD - 1) {
         const opacity = (Math.sin(Date.now() * 0.01) + 1) * 0.1;
         ctx.fillStyle = `rgba(239, 68, 68, ${opacity})`;
         ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
-        
-        ctx.strokeStyle = `rgba(239, 68, 68, ${opacity * 4})`;
-        ctx.lineWidth = 10;
-        ctx.strokeRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+    } else if (gameMode === GameMode.RUSH && rushProgress > 0.8) {
+         // Rush mode danger pulses faster
+        const opacity = (Math.sin(Date.now() * 0.02) + 1) * 0.1;
+        ctx.fillStyle = `rgba(239, 68, 68, ${opacity})`;
+        ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
     }
 
     // Draw Active Laser Beams
@@ -737,14 +836,12 @@ const GameCanvas: React.FC = () => {
           ctx.fillStyle = 'rgba(255,255,255,0.4)';
           ctx.fill();
 
-          // --- DRAW ITEM ICON INSIDE BUBBLE ---
           if (b.itemType === 'LASER') {
-              ctx.fillStyle = '#1e293b'; // Dark background for icon
+              ctx.fillStyle = '#1e293b'; 
               ctx.beginPath();
               ctx.arc(0, 0, 10, 0, Math.PI * 2);
               ctx.fill();
 
-              // Draw Zap Icon shape manually for canvas
               ctx.strokeStyle = '#22d3ee';
               ctx.lineWidth = 2;
               ctx.lineJoin = 'round';
@@ -785,7 +882,7 @@ const GameCanvas: React.FC = () => {
       ctx.restore();
     }
 
-    if (gameState === GAME_STATES.PLAYING) {
+    if (gameState === GAME_STATES.PLAYING || gameState === GAME_STATES.PAUSED) {
         const dx = mouseRef.current.x - CANVAS_WIDTH / 2;
         const dy = mouseRef.current.y - SHOOTER_Y;
         const angle = Math.atan2(dy, dx);
@@ -814,7 +911,7 @@ const GameCanvas: React.FC = () => {
         ctx.arc(0, -5, 6, 0, Math.PI * 2);
         
         let ammoColor = upcomingBubblesRef.current[0] === BubbleColor.EXPLOSIVE ? '#ef4444' : '#22d3ee';
-        if (upcomingBubblesRef.current[0] === BubbleColor.LASER) ammoColor = '#22d3ee'; // Laser core is cyan
+        if (upcomingBubblesRef.current[0] === BubbleColor.LASER) ammoColor = '#22d3ee'; 
 
         ctx.fillStyle = ammoColor;
         ctx.shadowColor = ammoColor;
@@ -837,10 +934,7 @@ const GameCanvas: React.FC = () => {
         if (!proj || !proj.active) {
             const currentColor = upcomingBubblesRef.current[0];
             
-            // SPECIAL DRAW FOR LASER PROJECTILE
             if (currentColor === BubbleColor.LASER) {
-                 // Laser Gun Barrel Look? Or just a glowing Orb?
-                 // Let's make it a glowing energy ball
                 ctx.beginPath();
                 ctx.arc(0, 0, BUBBLE_RADIUS, 0, Math.PI * 2);
                 ctx.fillStyle = '#fff';
@@ -848,7 +942,6 @@ const GameCanvas: React.FC = () => {
                 ctx.shadowBlur = 20;
                 ctx.fill();
                 
-                // Ring
                 ctx.strokeStyle = '#22d3ee';
                 ctx.lineWidth = 3;
                 ctx.beginPath();
@@ -986,10 +1079,8 @@ const GameCanvas: React.FC = () => {
         ctx.restore();
     }
 
-    // --- COMBO HUD ---
     if (comboRef.current > 0 && gameState === GAME_STATES.PLAYING && comboDisplayTimerRef.current > 0) {
         ctx.save();
-        // Fade out based on timer
         ctx.globalAlpha = Math.min(1, comboDisplayTimerRef.current);
         
         ctx.translate(CANVAS_WIDTH / 2, 70); 
@@ -1052,7 +1143,7 @@ const GameCanvas: React.FC = () => {
     ctx.textAlign = 'center';
     ctx.font = 'bold 24px Rajdhani';
     floatingTextsRef.current.forEach(t => {
-      ctx.fillStyle = t.text.includes('DANGER') || t.text.includes('BOOM') ? `rgba(239, 68, 68, ${t.opacity})` : `rgba(255, 255, 255, ${t.opacity})`;
+      ctx.fillStyle = t.text.includes('INCOMING') || t.text.includes('DANGER') || t.text.includes('BOOM') ? `rgba(239, 68, 68, ${t.opacity})` : `rgba(255, 255, 255, ${t.opacity})`;
       ctx.fillText(t.text, t.x, t.y);
     });
     ctx.restore();
@@ -1075,9 +1166,11 @@ const GameCanvas: React.FC = () => {
   useEffect(() => {
     animationFrameRef.current = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(animationFrameRef.current);
-  }, [gameState]);
+  }, [gameState, gameMode]);
 
   const handleMouseMove = (e: React.MouseEvent | React.TouchEvent) => {
+    if (gameState === GAME_STATES.PAUSED) return;
+
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
@@ -1101,6 +1194,8 @@ const GameCanvas: React.FC = () => {
   };
 
   const handleMouseDown = (e: React.MouseEvent | React.TouchEvent) => {
+      if (gameState !== GAME_STATES.PLAYING) return;
+
       const canvas = canvasRef.current;
       if (!canvas) return;
       
@@ -1147,32 +1242,48 @@ const GameCanvas: React.FC = () => {
           <span className="text-3xl font-bold font-mono text-cyan-400 neon-text">{score.toLocaleString()}</span>
         </div>
         
-        {/* Danger Meter */}
-        <div className="flex flex-col items-center gap-1">
-             <span className="text-[10px] text-red-500 font-bold tracking-widest uppercase">Danger</span>
-             <div className="flex gap-1">
-                 {[...Array(MISS_THRESHOLD)].map((_, i) => (
+        {/* Dynamic HUD based on Game Mode */}
+        {gameMode === GameMode.CLASSIC ? (
+             <div className="flex flex-col items-center gap-1">
+                 <span className="text-[10px] text-red-500 font-bold tracking-widest uppercase">Danger</span>
+                 <div className="flex gap-1">
+                     {[...Array(MISS_THRESHOLD)].map((_, i) => (
+                         <div 
+                            key={i} 
+                            className={`w-2 h-4 rounded-sm transition-all duration-300 ${i < missCount ? 'bg-red-500 shadow-[0_0_10px_red]' : 'bg-slate-700'}`}
+                         />
+                     ))}
+                 </div>
+            </div>
+        ) : (
+             <div className="flex flex-col items-center gap-1 w-32">
+                 <div className="flex justify-between w-full">
+                     <span className="text-[10px] text-yellow-400 font-bold tracking-widest uppercase flex items-center gap-1"><Timer size={10}/> Incoming</span>
+                     <span className="text-[10px] text-slate-400 font-mono">{(rushCurrentIntervalRef.current).toFixed(1)}s</span>
+                 </div>
+                 <div className="w-full h-4 bg-slate-700 rounded-sm overflow-hidden relative">
                      <div 
-                        key={i} 
-                        className={`w-2 h-4 rounded-sm transition-all duration-300 ${i < missCount ? 'bg-red-500 shadow-[0_0_10px_red]' : 'bg-slate-700'}`}
+                         className={`absolute left-0 top-0 bottom-0 transition-all duration-100 ease-linear ${rushProgress > 0.8 ? 'bg-red-500 shadow-[0_0_10px_red]' : 'bg-yellow-400'}`}
+                         style={{ width: `${rushProgress * 100}%` }}
                      />
-                 ))}
-             </div>
-        </div>
+                 </div>
+            </div>
+        )}
 
         <div className="flex items-center gap-4">
+           
            <div className="flex flex-col items-end">
              <span className="text-xs text-slate-400 uppercase tracking-widest">High</span>
              <span className="text-xl font-bold text-slate-200">{highScore > score ? highScore : score}</span>
            </div>
            
-           {/* Restart Button */}
+           {/* Settings / Pause Button */}
            <button 
-             onClick={initGame}
-             className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors border border-slate-600 text-cyan-400"
-             title="Restart Game"
+             onClick={togglePause}
+             className={`p-2 rounded-lg transition-colors border ${gameState === GAME_STATES.PAUSED ? 'bg-cyan-900 border-cyan-400 text-cyan-400' : 'bg-slate-700 border-slate-600 text-slate-300 hover:bg-slate-600'}`}
+             title="Settings / Pause"
            >
-             <RefreshCcw size={18} />
+             <Settings size={20} />
            </button>
         </div>
       </div>
@@ -1192,9 +1303,70 @@ const GameCanvas: React.FC = () => {
           onTouchStart={handleMouseDown}
         />
 
-        {/* Start / Game Over Overlay */}
+        {/* Start / Game Over / PAUSE Overlay */}
         {gameState !== GAME_STATES.PLAYING && (
-          <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-sm flex flex-col items-center justify-center animate-fade-in z-20">
+          <div className="absolute inset-0 bg-slate-900/90 backdrop-blur-md flex flex-col items-center justify-center animate-fade-in z-20">
+            
+            {/* PAUSE MENU */}
+            {gameState === GAME_STATES.PAUSED && (
+                <div className="w-full max-w-xs p-6 bg-slate-800 border border-slate-600 rounded-2xl shadow-2xl flex flex-col gap-6">
+                    <div className="flex justify-between items-center border-b border-slate-700 pb-4">
+                        <h2 className="text-2xl font-bold text-white tracking-widest">PAUSED</h2>
+                        <button onClick={togglePause} className="text-slate-400 hover:text-white transition-colors">
+                            <X size={24} />
+                        </button>
+                    </div>
+
+                    {/* Volume Controls */}
+                    <div className="space-y-4">
+                        <div className="flex flex-col gap-2">
+                            <div className="flex justify-between items-center text-sm text-cyan-400 font-bold">
+                                <span className="flex items-center gap-2"><Music size={16}/> BGM</span>
+                                <span>{Math.round(bgmVolume * 100)}%</span>
+                            </div>
+                            <input 
+                                type="range" 
+                                min="0" max="1" step="0.05"
+                                value={bgmVolume}
+                                onChange={(e) => updateVolumes('BGM', parseFloat(e.target.value))}
+                                className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500 hover:accent-cyan-400"
+                            />
+                        </div>
+
+                        <div className="flex flex-col gap-2">
+                            <div className="flex justify-between items-center text-sm text-yellow-400 font-bold">
+                                <span className="flex items-center gap-2"><Volume2 size={16}/> SFX</span>
+                                <span>{Math.round(sfxVolume * 100)}%</span>
+                            </div>
+                            <input 
+                                type="range" 
+                                min="0" max="1" step="0.05"
+                                value={sfxVolume}
+                                onChange={(e) => updateVolumes('SFX', parseFloat(e.target.value))}
+                                className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-yellow-500 hover:accent-yellow-400"
+                            />
+                        </div>
+                    </div>
+
+                    {/* Action Buttons */}
+                    <div className="flex flex-col gap-3 mt-2">
+                        <button
+                            onClick={togglePause}
+                            className="w-full py-3 bg-cyan-600 hover:bg-cyan-500 text-white font-bold rounded-xl transition-all hover:scale-[1.02] flex items-center justify-center gap-2"
+                        >
+                            <Play size={20} fill="currentColor" /> RESUME
+                        </button>
+                        <button
+                            onClick={restartGame}
+                            className="w-full py-3 bg-slate-700 hover:bg-slate-600 text-red-400 font-bold rounded-xl transition-all hover:scale-[1.02] flex items-center justify-center gap-2 border border-slate-600"
+                        >
+                            <RotateCcw size={20} /> RESTART
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {/* VICTORY SCREEN */}
             {gameState === GAME_STATES.VICTORY && (
                 <div className="mb-6 flex flex-col items-center animate-bounce">
                     <Trophy size={64} className="text-yellow-400 mb-2 drop-shadow-[0_0_15px_rgba(250,204,21,0.5)]" />
@@ -1202,26 +1374,70 @@ const GameCanvas: React.FC = () => {
                 </div>
             )}
             
+            {/* GAME OVER SCREEN */}
             {gameState === GAME_STATES.GAME_OVER && (
                  <h2 className="text-5xl font-black text-red-500 mb-8 italic tracking-tighter neon-text drop-shadow-[0_0_15px_rgba(239,68,68,0.8)]">GAME OVER</h2>
             )}
 
+            {/* MAIN MENU */}
             {gameState === GAME_STATES.MENU && (
-                <div className="text-center mb-10">
-                     <h1 className="text-5xl font-black text-cyan-400 mb-2 italic tracking-tighter neon-text">NEON</h1>
-                     <h1 className="text-5xl font-black text-purple-500 italic tracking-tighter neon-text">BUBBLE</h1>
+                <div className="flex flex-col items-center gap-8 w-full max-w-sm px-4">
+                    <div className="text-center">
+                         <h1 className="text-6xl font-black text-cyan-400 italic tracking-tighter neon-text">NEON</h1>
+                         <h1 className="text-6xl font-black text-purple-500 italic tracking-tighter neon-text">BUBBLE</h1>
+                    </div>
+                    
+                    <div className="grid grid-cols-2 gap-4 w-full">
+                        {/* CLASSIC MODE CARD */}
+                        <button
+                            onClick={() => initGame(GameMode.CLASSIC)}
+                            className="group relative p-4 bg-slate-800 hover:bg-slate-700 border-2 border-slate-600 hover:border-cyan-400 rounded-xl transition-all hover:-translate-y-1 flex flex-col items-center gap-3"
+                        >
+                            <div className="p-3 bg-slate-900 rounded-full text-cyan-400 group-hover:shadow-[0_0_15px_rgba(34,211,238,0.5)] transition-shadow">
+                                <Play size={24} />
+                            </div>
+                            <div className="text-center">
+                                <h3 className="font-black text-white text-lg italic">CLASSIC</h3>
+                                <p className="text-[10px] text-slate-400 leading-tight mt-1">Penalty on Miss</p>
+                            </div>
+                        </button>
+
+                        {/* RUSH MODE CARD */}
+                        <button
+                            onClick={() => initGame(GameMode.RUSH)}
+                            className="group relative p-4 bg-slate-800 hover:bg-slate-700 border-2 border-slate-600 hover:border-yellow-400 rounded-xl transition-all hover:-translate-y-1 flex flex-col items-center gap-3"
+                        >
+                             <div className="p-3 bg-slate-900 rounded-full text-yellow-400 group-hover:shadow-[0_0_15px_rgba(250,204,21,0.5)] transition-shadow">
+                                <Timer size={24} />
+                            </div>
+                            <div className="text-center">
+                                <h3 className="font-black text-white text-lg italic">RUSH</h3>
+                                <p className="text-[10px] text-slate-400 leading-tight mt-1">Time Pressure</p>
+                            </div>
+                        </button>
+                    </div>
+                </div>
+            )}
+            
+            {/* Try Again Button for Game Over / Victory */}
+            {(gameState === GAME_STATES.GAME_OVER || gameState === GAME_STATES.VICTORY) && (
+                <div className="flex flex-col gap-4 mt-8">
+                     <button
+                        onClick={restartGame}
+                        className="group relative px-8 py-4 bg-cyan-600 hover:bg-cyan-500 text-white font-bold rounded-full transition-all hover:scale-105 hover:shadow-[0_0_20px_rgba(8,145,178,0.6)] flex items-center gap-2"
+                        >
+                        <RotateCcw size={24} />
+                        <span className="text-xl tracking-wider">TRY AGAIN</span>
+                    </button>
+                    <button
+                        onClick={() => setGameState(GAME_STATES.MENU)}
+                        className="text-slate-400 hover:text-white text-sm tracking-widest underline decoration-slate-600 hover:decoration-white underline-offset-4"
+                    >
+                        RETURN TO MENU
+                    </button>
                 </div>
             )}
 
-            <button
-              onClick={initGame}
-              className="group relative px-8 py-4 bg-cyan-600 hover:bg-cyan-500 text-white font-bold rounded-full transition-all hover:scale-105 hover:shadow-[0_0_20px_rgba(8,145,178,0.6)] flex items-center gap-2"
-            >
-              {gameState === GAME_STATES.MENU ? <Play size={24} /> : <RotateCcw size={24} />}
-              <span className="text-xl tracking-wider">
-                {gameState === GAME_STATES.MENU ? 'START GAME' : 'TRY AGAIN'}
-              </span>
-            </button>
           </div>
         )}
       </div>
